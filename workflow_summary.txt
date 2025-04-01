@@ -1,0 +1,234 @@
+Workflow for a Standalone Photo Sorting System
+
+This system will allow users to upload photos, automatically detect & cluster faces, and retrieve images based on faces or names.
+
+---
+
+📌 Step 1: User Uploads Photos
+
+Users upload single or multiple photos through a web interface.
+
+The system stores images locally or in cloud storage (e.g., Firebase, AWS S3, or a local directory).
+
+Store image metadata (e.g., filename, upload date) in a database.
+
+🛠 Tech: React.js (Frontend), Django/FastAPI (Backend), PostgreSQL/MongoDB (Database)
+
+---
+
+📌 Step 2: Face Detection & Feature Extraction
+
+Once an image is uploaded, the backend detects faces using OpenCV or Mediapipe.
+
+Extract face embeddings (numerical representation of faces) using FaceNet, DeepFace, or Dlib.
+
+Store face embeddings in the database along with the image reference.
+
+🛠 Tech: OpenCV, FaceNet/DeepFace, Python
+
+---
+
+📌 Step 3: Face Clustering & Name Assignment
+
+Group similar faces using K-Means or DBSCAN clustering.
+
+Users can assign names to clusters (e.g., "John", "Mom").
+
+Once a name is assigned, all matching faces are labeled automatically.
+
+🛠 Tech: Scikit-Learn (DBSCAN/K-Means), DeepFace
+
+---
+
+📌 Step 4: Image Sorting & Retrieval
+
+Users can search for a person by name.
+
+The system retrieves all photos where that person's face appears.
+
+Provide filters (date, location, etc.).
+
+🛠 Tech: SQL queries for search, FastAPI/Django API
+
+---
+
+📌 Step 5: Display & User Interaction
+
+Display organized albums sorted by people.
+
+Allow users to manually correct misclassified faces.
+
+Option to delete or rename clusters.
+
+🛠 Tech: React.js (Frontend), TailwindCSS
+
+---
+
+🚀 Final Tech Stack Summary
+
+✅ Frontend: React.js (for UI)
+✅ Backend: Django/FastAPI (for API & processing)
+✅ Database: PostgreSQL/MongoDB (for metadata & face embeddings)
+✅ Face Recognition: FaceNet/DeepFace (for feature extraction)
+✅ Storage: Local storage or Firebase/AWS S3 (for images)
+
+---
+
+DATABASE SCHEMA:
+
+1. PHOTOS table
+   - RECORD_ID (Primary Key)
+   - FILE_NAME (VARCHAR)
+   - FILE_PATH (VARCHAR)
+   - UPLOAD_DATE (TIMESTAMP)
+   - LOCATION (VARCHAR, Optional)
+   - METADATA (JSONB)
+   - CREATED_AT (TIMESTAMP)
+   - UPDATED_AT (TIMESTAMP)
+
+2. FACES table
+   - RECORD_ID (Primary Key)
+   - PHOTO_ID (Foreign Key to PHOTOS)
+   - FACE_LOCATION (JSONB - coordinates)
+   - FACE_EMBEDDING (VECTOR/ARRAY)
+   - CLUSTER_ID (Foreign Key to FACE_CLUSTERS)
+   - DETECTION_CONFIDENCE (FLOAT)
+   - CREATED_AT (TIMESTAMP)
+   - UPDATED_AT (TIMESTAMP)
+
+3. FACE_CLUSTERS table
+   - RECORD_ID (Primary Key)
+   - NAME (VARCHAR)
+   - FACE_COUNT (INTEGER)
+   - CREATED_AT (TIMESTAMP)
+   - UPDATED_AT (TIMESTAMP)
+
+4. USERS table (Optional)
+   - RECORD_ID (Primary Key)
+   - USERNAME (VARCHAR)
+   - EMAIL (VARCHAR)
+   - PASSWORD_HASH (VARCHAR)
+   - CREATED_AT (TIMESTAMP)
+   - UPDATED_AT (TIMESTAMP)
+
+5. PHOTO_LABELS table (Optional)
+   - RECORD_ID (Primary Key)
+   - PHOTO_ID (Foreign Key to PHOTOS)
+   - LABEL_TEXT (VARCHAR)
+   - CREATED_AT (TIMESTAMP)
+   - UPDATED_AT (TIMESTAMP)
+
+---
+
+10-Day Plan to Build a Standalone Face-Sorting Photo System
+
+This plan covers photo uploads, face detection, clustering, and search functionality step by step.
+
+---
+
+📅 Day 1: Project Setup & Initial Backend API
+
+✅ Set up a Django backend.
+✅ Configure a database (PostgreSQL) to store image metadata.
+✅ Create basic API endpoints for image uploads.
+
+🛠 Tech: Django, PostgreSQL, REST API
+
+---
+
+📅 Day 2: Frontend Setup & File Upload System
+
+✅ Set up React.js for the frontend.
+✅ Create an image upload form with drag-and-drop support.
+✅ Connect frontend and backend to store images in local storage/cloud.
+
+🛠 Tech: React.js, TailwindCSS, Axios
+
+---
+
+📅 Day 3: Face Detection & Feature Extraction
+
+✅ Implement face detection using OpenCV & Mediapipe.
+✅ Extract face embeddings using FaceNet/DeepFace.
+✅ Store extracted embeddings in the database.
+
+🛠 Tech: Python, OpenCV, FaceNet/DeepFace
+
+---
+
+📅 Day 4: Clustering & Face Grouping
+
+✅ Use DBSCAN/K-Means to cluster similar faces.
+✅ Assign a unique ID to each cluster in the database.
+✅ Return face cluster results via API.
+
+🛠 Tech: Scikit-Learn, NumPy, Pandas
+
+---
+
+📅 Day 5: Naming & Labeling Faces
+
+✅ Create a UI for users to name a face cluster.
+✅ Store assigned names in the database.
+✅ Update clustering logic to map faces to user-defined names.
+
+🛠 Tech: React.js, API Integration
+
+---
+
+📅 Day 6: Search & Face-Based Image Retrieval
+
+✅ Implement search functionality (find images by name).
+✅ Fetch and display all photos of a selected person.
+✅ Optimize database queries for fast search.
+
+🛠 Tech: SQL/NoSQL Queries, Django/FastAPI
+
+---
+
+📅 Day 7: Image Sorting & Filtering Features
+
+✅ Organize photos by faces, date, and location.
+✅ Allow users to filter by date range & face clusters.
+✅ Improve UI to display grouped images neatly.
+
+🛠 Tech: React.js, TailwindCSS
+
+---
+
+📅 Day 8: Face Correction & User Editing
+
+✅ Let users merge or split clusters if detection is incorrect.
+✅ Allow users to delete or rename a face cluster.
+✅ Store changes persistently in the database.
+
+🛠 Tech: React.js, Django/FastAPI, Database Updates
+
+---
+
+📅 Day 9: Performance Optimization & Bug Fixes
+
+✅ Optimize face recognition speed using caching techniques.
+✅ Reduce image processing time with multithreading.
+✅ Fix any UI/Backend bugs found during testing.
+
+🛠 Tech: Python, Async Processing, Optimized DB Queries
+
+---
+
+📅 Day 10: Deployment & Testing
+
+✅ Deploy backend to Render/Vercel and frontend to Netlify.
+✅ Test the system with real user uploads.
+✅ Finalize documentation and improve UI/UX.
+
+🛠 Tech: Docker (optional), Vercel/Netlify, API Documentation
+
+---
+
+🚀 Final Outcome:
+
+✔ Users can upload photos & detect faces.
+✔ Faces are automatically grouped & sorted.
+✔ Users can name faces & search images.
+✔ System is fully functional & deployed.

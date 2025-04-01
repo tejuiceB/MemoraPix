@@ -1,0 +1,19 @@
+# Git
+.git/
+
+# Django Backend
+.Python
+env/
+build/
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+.env
+
+# Media files
+media/
+!media/.gitkeep
+
+# IDE specific files
+.idea/
+.vscode/
