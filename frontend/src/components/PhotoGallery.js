@@ -96,20 +96,39 @@ function PhotoGallery() {
                             ) : (
                                 cluster.photos.map((photo) => (
                                     <div key={photo.RECORD_ID} className="photo-item">
-                                        <img 
-                                            src={`http://127.0.0.1:8000/media/${photo.FILE_PATH}`}
-                                            alt={photo.FILE_NAME}
-                                            onError={(e) => {
-                                                console.error(`Error loading image: ${photo.FILE_PATH}`);
-                                                e.target.src = 'https://via.placeholder.com/150?text=Image+Not+Found';
-                                            }}
-                                            style={{
-                                                width: '200px',
-                                                height: '200px',
-                                                objectFit: 'cover'
-                                            }}
-                                        />
-                                        <p>{photo.FILE_NAME}</p>
+                                        <div className="photo-container">
+                                            <img 
+                                                src={`http://127.0.0.1:8000/media/${photo.FILE_PATH}`}
+                                                alt={photo.FILE_NAME}
+                                                onError={(e) => {
+                                                    console.error(`Error loading image: ${photo.FILE_PATH}`);
+                                                    e.target.src = 'https://via.placeholder.com/150?text=Image+Not+Found';
+                                                }}
+                                            />
+                                            {/* Draw boxes around detected faces */}
+                                            {photo.faces && photo.faces.map((face, index) => (
+                                                <div
+                                                    key={index}
+                                                    className="face-box"
+                                                    style={{
+                                                        position: 'absolute',
+                                                        left: `${(face.face_location.x / photo.width) * 100}%`,
+                                                        top: `${(face.face_location.y / photo.height) * 100}%`,
+                                                        width: `${(face.face_location.width / photo.width) * 100}%`,
+                                                        height: `${(face.face_location.height / photo.height) * 100}%`,
+                                                        border: `2px solid ${face.cluster_name === cluster.NAME ? '#4CAF50' : '#FFA500'}`,
+                                                        borderRadius: '4px',
+                                                        pointerEvents: 'none'
+                                                    }}
+                                                />
+                                            ))}
+                                        </div>
+                                        <div className="photo-info">
+                                            <p>{photo.FILE_NAME}</p>
+                                            <p className="photo-faces">
+                                                People in photo: {photo.faces.map(face => face.cluster_name).join(', ')}
+                                            </p>
+                                        </div>
                                     </div>
                                 ))
                             )}

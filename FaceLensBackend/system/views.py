@@ -15,6 +15,7 @@ from django.db.models import Q
 import uuid
 from mtcnn import MTCNN
 import tensorflow as tf
+from PIL import Image  # Add this import
 
 @csrf_exempt
 def upload_image(request):
@@ -59,67 +60,87 @@ def process_image(request):
             if image is None:
                 return JsonResponse({'error': 'Could not read image file'}, status=400)
 
-            # Initialize MTCNN detector without custom parameters
+            # Resize large images before processing
+            max_dimension = 1200
+            img_array = np.array(Image.open(image_path))
+            height, width = img_array.shape[:2]
+            
+            if width > max_dimension or height > max_dimension:
+                # Calculate new dimensions while maintaining aspect ratio
+                if width > height:
+                    new_width = max_dimension
+                    new_height = int(height * (max_dimension / width))
+                else:
+                    new_height = max_dimension
+                    new_width = int(width * (max_dimension / height))
+                
+                img_array = np.array(Image.fromarray(img_array).resize((new_width, new_height)))
+
+            # Convert to RGB if needed
+            if len(img_array.shape) == 2:  # Grayscale
+                img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2RGB)
+            elif img_array.shape[2] == 4:  # RGBA
+                img_array = cv2.cvtColor(img_array, cv2.COLOR_RGBA2RGB)
+
+            # Initialize MTCNN detector
             detector = MTCNN()
-            
-            # Detect faces using MTCNN
-            rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            detected_faces = detector.detect_faces(rgb_image)
-            
+            detected_faces = detector.detect_faces(img_array)
+
             faces_processed = 0
             for face_info in detected_faces:
                 try:
                     if face_info['confidence'] < 0.85:
                         continue
-                        
-                    x, y, w, h = face_info['box']
+
+                    # Convert all numeric values to standard Python types
+                    x, y, w, h = map(int, face_info['box'])  # Convert to regular Python int
                     
-                    # Save the cropped face image for cluster display
-                    face = image[y:y+h, x:x+w]
+                    face = img_array[y:y+h, x:x+w]
                     face = cv2.resize(face, (224, 224))
+                    
+                    # Generate unique filename for the face
                     face_filename = f"face_{uuid.uuid4()}.jpg"
                     face_path = os.path.join(settings.MEDIA_ROOT, 'faces', face_filename)
                     
-                    # Create faces directory if it doesn't exist
+                    # Ensure faces directory exists
                     os.makedirs(os.path.join(settings.MEDIA_ROOT, 'faces'), exist_ok=True)
-                    cv2.imwrite(face_path, face)
+                    
+                    # Save face image
+                    cv2.imwrite(face_path, cv2.cvtColor(face, cv2.COLOR_RGB2BGR))
 
-                    # Enhance face quality
-                    face = cv2.resize(face, (224, 224))  # Standard size for VGG-Face
-                    face = cv2.normalize(face, None, 0, 255, cv2.NORM_MINMAX)
+                    # Get embedding
+                    embedding = DeepFace.represent(
+                        img_path=face_path,
+                        model_name='VGG-Face',
+                        enforce_detection=False,
+                        detector_backend='skip'
+                    )
 
-                    # Save face temporarily
-                    temp_face_path = os.path.join(settings.MEDIA_ROOT, f'temp_face_{uuid.uuid4()}.jpg')
-                    cv2.imwrite(temp_face_path, face)
+                    if embedding:
+                        # Convert keypoints to serializable format
+                        keypoints = {
+                            k: [int(x) for x in v] if isinstance(v, (list, tuple, np.ndarray)) 
+                            else int(v) 
+                            for k, v in face_info['keypoints'].items()
+                        }
 
-                    try:
-                        # Get embedding
-                        embedding = DeepFace.represent(
-                            img_path=temp_face_path,
-                            model_name='VGG-Face',
-                            enforce_detection=False,
-                            detector_backend='skip'
+                        # Convert embedding to regular Python list with float values
+                        embedding_list = [float(x) for x in embedding[0]['embedding']]
+
+                        FACES.objects.create(
+                            PHOTO=photo,
+                            FACE_LOCATION={
+                                'x': x,
+                                'y': y,
+                                'width': w,
+                                'height': h,
+                                'landmarks': keypoints,
+                                'face_image': f"faces/{face_filename}"
+                            },
+                            FACE_EMBEDDING=embedding_list,
+                            DETECTION_CONFIDENCE=float(face_info['confidence'])
                         )
-
-                        if embedding:
-                            FACES.objects.create(
-                                PHOTO=photo,
-                                FACE_LOCATION={
-                                    'x': int(x),
-                                    'y': int(y),
-                                    'width': int(w),
-                                    'height': int(h),
-                                    'landmarks': face_info['keypoints'],
-                                    'face_image': f"faces/{face_filename}"  # Store relative path
-                                },
-                                FACE_EMBEDDING=embedding[0]['embedding'],
-                                DETECTION_CONFIDENCE=float(face_info['confidence'])
-                            )
-                            faces_processed += 1
-
-                    finally:
-                        if os.path.exists(temp_face_path):
-                            os.remove(temp_face_path)
+                        faces_processed += 1
 
                 except Exception as face_error:
                     print(f"Error processing face: {str(face_error)}")
@@ -166,7 +187,6 @@ def calculate_iou(box1, box2):
 def cluster_faces(request):
     if request.method == 'POST':
         try:
-            # Fetch all face embeddings from the database
             faces = FACES.objects.filter(CLUSTER__isnull=True).values('RECORD_ID', 'FACE_EMBEDDING')
             if not faces:
                 return JsonResponse({'message': 'No unclustered faces found.'})
@@ -174,46 +194,80 @@ def cluster_faces(request):
             embeddings = [face['FACE_EMBEDDING'] for face in faces]
             record_ids = [face['RECORD_ID'] for face in faces]
 
-            # Normalize embeddings before clustering
+            # Normalize embeddings
             embeddings_array = np.array(embeddings)
             norms = np.linalg.norm(embeddings_array, axis=1)
             normalized_embeddings = embeddings_array / norms[:, np.newaxis]
 
-            # Adjusted DBSCAN parameters for better clustering
+            # More lenient DBSCAN parameters
             dbscan = DBSCAN(
-                eps=0.3,              # More strict distance threshold
-                min_samples=2,        # Minimum cluster size
-                metric='cosine',      # Better for face embeddings
+                eps=0.45,              # Increased from 0.3 to 0.45 for more inclusive clustering
+                min_samples=2,         # Keep minimum cluster size at 2
+                metric='cosine',       # Using cosine similarity
                 n_jobs=-1
             )
             
             cluster_labels = dbscan.fit_predict(normalized_embeddings)
 
-            # Reset existing clusters for these faces
+            # Count unique clusters before processing
+            unique_clusters = set(label for label in cluster_labels if label != -1)
+            print(f"Initial number of clusters: {len(unique_clusters)}")
+
+            # Reset existing clusters
             FACES.objects.filter(RECORD_ID__in=record_ids).update(CLUSTER=None)
 
-            # Create new clusters
-            for record_id, cluster_id in zip(record_ids, cluster_labels):
-                if cluster_id != -1:  # Ignore noise points
-                    cluster, created = FACE_CLUSTERS.objects.get_or_create(NAME=f'Cluster {cluster_id}')
+            # Dictionary to store cluster centroids
+            cluster_centroids = {}
+
+            # Calculate centroids for each cluster
+            for cluster_id in unique_clusters:
+                cluster_mask = cluster_labels == cluster_id
+                cluster_embeddings = normalized_embeddings[cluster_mask]
+                centroid = np.mean(cluster_embeddings, axis=0)
+                cluster_centroids[cluster_id] = centroid
+
+            # Merge similar clusters
+            merged_labels = cluster_labels.copy()
+            merge_threshold = 0.6  # Threshold for merging clusters
+
+            for c1 in unique_clusters:
+                for c2 in unique_clusters:
+                    if c1 < c2:  # Only check each pair once
+                        centroid1 = cluster_centroids[c1]
+                        centroid2 = cluster_centroids[c2]
+                        similarity = np.dot(centroid1, centroid2)
+                        
+                        if similarity > merge_threshold:
+                            # Merge clusters by updating labels
+                            merged_labels[merged_labels == c2] = c1
+
+            # Create new clusters with merged labels
+            for record_id, cluster_id in zip(record_ids, merged_labels):
+                if cluster_id != -1:
+                    cluster, created = FACE_CLUSTERS.objects.get_or_create(
+                        NAME=f'Person {cluster_id + 1}'  # More friendly naming
+                    )
                     FACES.objects.filter(RECORD_ID=record_id).update(CLUSTER=cluster)
 
-            # Update cluster face counts
+            # Update cluster face counts and clean up empty clusters
             clusters = FACE_CLUSTERS.objects.all()
             for cluster in clusters:
                 face_count = FACES.objects.filter(CLUSTER=cluster).count()
-                if face_count == 0:  # Delete empty clusters
+                if face_count == 0:
                     cluster.delete()
                 else:
                     cluster.FACE_COUNT = face_count
                     cluster.save()
 
+            final_cluster_count = FACE_CLUSTERS.objects.count()
             return JsonResponse({
                 'message': 'Clustering completed successfully.',
-                'clusters_created': len(set(label for label in cluster_labels if label != -1))
+                'clusters_created': final_cluster_count,
+                'faces_processed': len(faces)
             })
 
         except Exception as e:
+            print(f"Clustering error: {str(e)}")
             return JsonResponse({'error': str(e)}, status=500)
 
     return JsonResponse({'error': 'Invalid request'}, status=400)
@@ -247,10 +301,38 @@ def search_images(request):
     if request.method == 'GET':
         try:
             cluster_name = request.GET.get('cluster_name')
-            face_id = request.GET.get('face_id')
-            start_date = request.GET.get('start_date')
-            end_date = request.GET.get('end_date')
-            location = request.GET.get('location')
+
+            # Modified query to get all photos containing faces from this cluster
+            if cluster_name:
+                # Find the cluster
+                clusters = FACE_CLUSTERS.objects.filter(NAME__icontains=cluster_name)
+                if clusters.exists():
+                    # Get all faces in this cluster
+                    cluster_faces = FACES.objects.filter(CLUSTER__in=clusters)
+                    # Get all photos that contain these faces
+                    photos_query = PHOTOS.objects.filter(
+                        RECORD_ID__in=cluster_faces.values('PHOTO')
+                    ).distinct()  # Use distinct to avoid duplicates
+                    
+                    # For each photo, get all faces detected in it
+                    photos = []
+                    for photo in photos_query:
+                        faces_in_photo = FACES.objects.filter(PHOTO=photo).select_related('CLUSTER')
+                        photo_data = {
+                            'RECORD_ID': photo.RECORD_ID,
+                            'FILE_NAME': photo.FILE_NAME,
+                            'FILE_PATH': photo.FILE_PATH,
+                            'UPLOAD_DATE': photo.UPLOAD_DATE,
+                            'LOCATION': photo.LOCATION,
+                            'faces': [{
+                                'face_location': face.FACE_LOCATION,
+                                'cluster_name': face.CLUSTER.NAME if face.CLUSTER else None,
+                                'detection_confidence': face.DETECTION_CONFIDENCE
+                            } for face in faces_in_photo]
+                        }
+                        photos.append(photo_data)
+                    
+                    return JsonResponse({'photos': photos})
 
             # Base query for photos
             photos_query = PHOTOS.objects.all()
@@ -262,15 +344,19 @@ def search_images(request):
                 photos_query = photos_query.filter(RECORD_ID__in=faces.values('PHOTO'))
 
             # Filter by face ID
+            face_id = request.GET.get('face_id')
             if face_id:
                 faces = FACES.objects.filter(RECORD_ID=face_id)
                 photos_query = photos_query.filter(RECORD_ID__in=faces.values('PHOTO'))
 
             # Filter by date range
+            start_date = request.GET.get('start_date')
+            end_date = request.GET.get('end_date')
             if start_date and end_date:
                 photos_query = photos_query.filter(UPLOAD_DATE__range=[start_date, end_date])
 
             # Filter by location
+            location = request.GET.get('location')
             if location:
                 photos_query = photos_query.filter(LOCATION__icontains=location)
 
