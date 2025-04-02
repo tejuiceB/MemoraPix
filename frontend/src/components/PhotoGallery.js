@@ -34,7 +34,8 @@ function PhotoGallery() {
                         console.log(`Photos for cluster ${cluster.NAME}:`, photosResponse.data); // Debug log
                         return {
                             ...cluster,
-                            photos: photosResponse.data.photos || []
+                            photos: photosResponse.data.photos || [],
+                            representativeFace: cluster.representative_face
                         };
                     } catch (photoError) {
                         console.error(`Error fetching photos for cluster ${cluster.NAME}:`, photoError);
@@ -76,7 +77,19 @@ function PhotoGallery() {
             ) : (
                 clusters.map((cluster) => (
                     <div key={cluster.RECORD_ID} className="cluster-section">
-                        <h3>{cluster.NAME} ({cluster.photos.length} photos)</h3>
+                        <div className="cluster-header">
+                            <h3>{cluster.NAME} ({cluster.photos.length} photos)</h3>
+                            {cluster.representativeFace && (
+                                <img 
+                                    src={`http://127.0.0.1:8000/media/${cluster.representativeFace}`}
+                                    alt={`Representative face for ${cluster.NAME}`}
+                                    className="representative-face"
+                                    onError={(e) => {
+                                        e.target.src = 'https://via.placeholder.com/150?text=No+Face';
+                                    }}
+                                />
+                            )}
+                        </div>
                         <div className="photo-grid">
                             {cluster.photos.length === 0 ? (
                                 <p>No photos in this cluster</p>

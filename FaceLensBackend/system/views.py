@@ -3,16 +3,18 @@ from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.core.files.storage import default_storage
 from django.core.files.base import ContentFile
-from django.conf import settings  # Add this import
+from django.conf import settings
 from .models import PHOTOS, FACES, FACE_CLUSTERS
 import os
 import datetime
 from deepface import DeepFace
-import cv2  # Import OpenCV for face detection
+import cv2
 import numpy as np
 from sklearn.cluster import DBSCAN
 from django.db.models import Q
-import uuid  # Import for generating unique names
+import uuid
+from mtcnn import MTCNN
+import tensorflow as tf
 
 @csrf_exempt
 def upload_image(request):
@@ -46,96 +48,119 @@ def process_image(request):
             if not record_id:
                 return JsonResponse({'error': 'Record ID is required'}, status=400)
 
-            # Fetch the photo record
             photo = PHOTOS.objects.get(RECORD_ID=record_id)
-            
-            # Construct absolute path using MEDIA_ROOT
             image_path = os.path.join(settings.MEDIA_ROOT, photo.FILE_PATH)
-            print(f"Processing image at path: {image_path}")
-
-            # Verify file exists
+            
             if not os.path.exists(image_path):
                 return JsonResponse({'error': f'Image not found at {image_path}'}, status=404)
 
-            # Load the image using OpenCV
+            # Load and process image
             image = cv2.imread(image_path)
             if image is None:
                 return JsonResponse({'error': 'Could not read image file'}, status=400)
 
-            # Rest of face detection and processing code...
+            # Initialize MTCNN detector without custom parameters
+            detector = MTCNN()
             
-            # Add debug logging
-            print(f"Processing image: {image_path}")
-            print(f"Image shape: {image.shape if image is not None else 'None'}")
-
-            # Convert to grayscale for face detection
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-
-            # Load OpenCV's pre-trained Haar Cascade for face detection
-            face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-            faces = face_cascade.detectMultiScale(
-                gray,
-                scaleFactor=1.1,
-                minNeighbors=7,
-                minSize=(60, 60),
-                maxSize=(800, 800)
-            )
-
-            print(f"Detected {len(faces)} faces")
-
-            # Process each detected face
+            # Detect faces using MTCNN
+            rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            detected_faces = detector.detect_faces(rgb_image)
+            
             faces_processed = 0
-            for (x, y, w, h) in faces:
+            for face_info in detected_faces:
                 try:
-                    # Add padding around the face
-                    pad = int(max(w, h) * 0.2)
-                    x1 = max(0, x - pad)
-                    y1 = max(0, y - pad)
-                    x2 = min(image.shape[1], x + w + pad)
-                    y2 = min(image.shape[0], y + h + pad)
-                    
-                    face = image[y1:y2, x1:x2]
-                    
-                    if face.shape[0] < 64 or face.shape[1] < 64:
+                    if face_info['confidence'] < 0.85:
                         continue
+                        
+                    x, y, w, h = face_info['box']
+                    
+                    # Save the cropped face image for cluster display
+                    face = image[y:y+h, x:x+w]
+                    face = cv2.resize(face, (224, 224))
+                    face_filename = f"face_{uuid.uuid4()}.jpg"
+                    face_path = os.path.join(settings.MEDIA_ROOT, 'faces', face_filename)
+                    
+                    # Create faces directory if it doesn't exist
+                    os.makedirs(os.path.join(settings.MEDIA_ROOT, 'faces'), exist_ok=True)
+                    cv2.imwrite(face_path, face)
 
-                    face_embedding = DeepFace.represent(
-                        img_path=face,
-                        model_name='VGG-Face',
-                        enforce_detection=False,
-                        detector_backend='opencv'
-                    )[0]['embedding']
+                    # Enhance face quality
+                    face = cv2.resize(face, (224, 224))  # Standard size for VGG-Face
+                    face = cv2.normalize(face, None, 0, 255, cv2.NORM_MINMAX)
 
-                    FACES.objects.create(
-                        PHOTO=photo,
-                        FACE_LOCATION={
-                            'x': int(x),
-                            'y': int(y),
-                            'width': int(w),
-                            'height': int(h)
-                        },
-                        FACE_EMBEDDING=face_embedding,
-                        DETECTION_CONFIDENCE=1.0
-                    )
-                    faces_processed += 1
+                    # Save face temporarily
+                    temp_face_path = os.path.join(settings.MEDIA_ROOT, f'temp_face_{uuid.uuid4()}.jpg')
+                    cv2.imwrite(temp_face_path, face)
 
-                except Exception as e:
-                    print(f"Error processing face in {photo.FILE_NAME}: {str(e)}")
+                    try:
+                        # Get embedding
+                        embedding = DeepFace.represent(
+                            img_path=temp_face_path,
+                            model_name='VGG-Face',
+                            enforce_detection=False,
+                            detector_backend='skip'
+                        )
+
+                        if embedding:
+                            FACES.objects.create(
+                                PHOTO=photo,
+                                FACE_LOCATION={
+                                    'x': int(x),
+                                    'y': int(y),
+                                    'width': int(w),
+                                    'height': int(h),
+                                    'landmarks': face_info['keypoints'],
+                                    'face_image': f"faces/{face_filename}"  # Store relative path
+                                },
+                                FACE_EMBEDDING=embedding[0]['embedding'],
+                                DETECTION_CONFIDENCE=float(face_info['confidence'])
+                            )
+                            faces_processed += 1
+
+                    finally:
+                        if os.path.exists(temp_face_path):
+                            os.remove(temp_face_path)
+
+                except Exception as face_error:
+                    print(f"Error processing face: {str(face_error)}")
                     continue
 
             return JsonResponse({
                 'message': f'Successfully processed {faces_processed} faces in image',
-                'faces_detected': len(faces),
+                'faces_detected': len(detected_faces),
                 'faces_processed': faces_processed
             })
 
         except PHOTOS.DoesNotExist:
             return JsonResponse({'error': f'Photo record not found for ID: {record_id}'}, status=404)
         except Exception as e:
-            print(f"Error processing image: {str(e)}")  # Add server-side logging
+            print(f"Error processing image: {str(e)}")
             return JsonResponse({'error': str(e)}, status=500)
 
     return JsonResponse({'error': 'Invalid request method'}, status=400)
+
+def calculate_iou(box1, box2):
+    """Calculate intersection over union between two boxes"""
+    x1, y1, w1, h1 = box1
+    x2, y2, w2, h2 = box2
+    
+    # Calculate intersection
+    xi1 = max(x1, x2)
+    yi1 = max(y1, y2)
+    xi2 = min(x1 + w1, x2 + w2)
+    yi2 = min(y1 + h1, y2 + h2)
+    
+    if xi2 <= xi1 or yi2 <= yi1:
+        return 0.0
+    
+    intersection = (xi2 - xi1) * (yi2 - yi1)
+    
+    # Calculate union
+    box1_area = w1 * h1
+    box2_area = w2 * h2
+    union = box1_area + box2_area - intersection
+    
+    return intersection / union if union > 0 else 0.0
 
 @csrf_exempt
 def cluster_faces(request):
@@ -149,38 +174,39 @@ def cluster_faces(request):
             embeddings = [face['FACE_EMBEDDING'] for face in faces]
             record_ids = [face['RECORD_ID'] for face in faces]
 
-            print(f"Embeddings: {embeddings}")  # Debugging log
-            print(f"Record IDs: {record_ids}")  # Debugging log
-
-            # Perform clustering using DBSCAN
-            dbscan = DBSCAN(
-                eps=0.4,              # Reduced epsilon for stricter clustering
-                min_samples=3,        # Increased minimum samples
-                metric='cosine',      # Changed to cosine similarity
-                n_jobs=-1             # Use all CPU cores
-            )
-            
             # Normalize embeddings before clustering
             embeddings_array = np.array(embeddings)
             norms = np.linalg.norm(embeddings_array, axis=1)
             normalized_embeddings = embeddings_array / norms[:, np.newaxis]
+
+            # Adjusted DBSCAN parameters for better clustering
+            dbscan = DBSCAN(
+                eps=0.3,              # More strict distance threshold
+                min_samples=2,        # Minimum cluster size
+                metric='cosine',      # Better for face embeddings
+                n_jobs=-1
+            )
             
             cluster_labels = dbscan.fit_predict(normalized_embeddings)
 
-            print(f"Cluster Labels: {cluster_labels}")  # Debugging log
+            # Reset existing clusters for these faces
+            FACES.objects.filter(RECORD_ID__in=record_ids).update(CLUSTER=None)
 
-            # Save clusters to the database
+            # Create new clusters
             for record_id, cluster_id in zip(record_ids, cluster_labels):
                 if cluster_id != -1:  # Ignore noise points
                     cluster, created = FACE_CLUSTERS.objects.get_or_create(NAME=f'Cluster {cluster_id}')
                     FACES.objects.filter(RECORD_ID=record_id).update(CLUSTER=cluster)
 
-            # Count faces in each cluster
+            # Update cluster face counts
             clusters = FACE_CLUSTERS.objects.all()
             for cluster in clusters:
                 face_count = FACES.objects.filter(CLUSTER=cluster).count()
-                cluster.FACE_COUNT = face_count
-                cluster.save()
+                if face_count == 0:  # Delete empty clusters
+                    cluster.delete()
+                else:
+                    cluster.FACE_COUNT = face_count
+                    cluster.save()
 
             return JsonResponse({
                 'message': 'Clustering completed successfully.',
@@ -309,7 +335,11 @@ def process_all_photos(request):
                 embeddings = [face['FACE_EMBEDDING'] for face in faces]
                 record_ids = [face['RECORD_ID'] for face in faces]
 
-                dbscan = DBSCAN(eps=0.8, min_samples=2, metric='euclidean')
+                dbscan = DBSCAN(
+                    eps=0.35,
+                    min_samples=2,
+                    metric='cosine'
+                )
                 cluster_labels = dbscan.fit_predict(embeddings)
 
                 # Save clusters
@@ -333,7 +363,20 @@ def get_clusters(request):
     if request.method == 'GET':
         try:
             clusters = FACE_CLUSTERS.objects.all()
-            clusters_data = list(clusters.values('RECORD_ID', 'NAME', 'FACE_COUNT'))
+            clusters_data = []
+            
+            for cluster in clusters:
+                # Get a representative face for each cluster
+                representative_face = FACES.objects.filter(CLUSTER=cluster).first()
+                face_image_path = representative_face.FACE_LOCATION.get('face_image') if representative_face else None
+                
+                clusters_data.append({
+                    'RECORD_ID': cluster.RECORD_ID,
+                    'NAME': cluster.NAME,
+                    'FACE_COUNT': cluster.FACE_COUNT,
+                    'representative_face': face_image_path
+                })
+            
             return JsonResponse({'clusters': clusters_data})
         except Exception as e:
             return JsonResponse({'error': str(e)}, status=500)

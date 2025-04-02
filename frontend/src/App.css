@@ -127,3 +127,19 @@
     border-bottom: 1px solid #eee;
     font-size: 14px;
 }
+
+.cluster-header {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    margin-bottom: 15px;
+}
+
+.representative-face {
+    width: 100px;
+    height: 100px;
+    object-fit: cover;
+    border-radius: 50%;
+    border: 3px solid #4CAF50;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+}
