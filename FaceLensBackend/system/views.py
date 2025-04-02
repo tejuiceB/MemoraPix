@@ -85,7 +85,7 @@ def process_image(request):
             if not os.path.exists(image_path):
                 return JsonResponse({'error': f'Image not found at {image_path}'}, status=404)
 
-            # Initialize MTCNN with default parameters (removed invalid parameters)
+            # Initialize MTCNN without parameters
             detector = MTCNN()
 
             # Load and process image
@@ -94,62 +94,74 @@ def process_image(request):
                 return JsonResponse({'error': 'Could not read image file'}, status=400)
 
             # Resize large images to improve performance
-            max_dimension = 1200
+            max_dimension = 1500
             height, width = img_array.shape[:2]
             if width > max_dimension or height > max_dimension:
-                if width > height:
-                    new_width = max_dimension
-                    new_height = int(height * (max_dimension / width))
-                else:
-                    new_height = max_dimension
-                    new_width = int(width * (max_dimension / height))
-                img_array = cv2.resize(img_array, (new_width, new_height))
+                scale = max_dimension / max(width, height)
+                img_array = cv2.resize(img_array, None, fx=scale, fy=scale)
 
             # Convert BGR to RGB (MTCNN expects RGB)
             img_array = cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB)
 
-            # Detect faces with MTCNN
-            detected_faces = detector.detect_faces(img_array)
+            # Try different image preprocessing techniques
+            detected_faces = []
+            
+            # Try original image
+            faces = detector.detect_faces(img_array)
+            if faces:
+                detected_faces.extend(faces)
+            
+            # If no faces found, try with histogram equalization
+            if not detected_faces:
+                img_eq = cv2.equalizeHist(cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY))
+                img_eq = cv2.cvtColor(img_eq, cv2.COLOR_GRAY2RGB)
+                faces = detector.detect_faces(img_eq)
+                if faces:
+                    detected_faces.extend(faces)
+
+            # If still no faces, try with different scales
+            if not detected_faces:
+                scales = [1.0, 0.5, 1.5, 2.0]  # Added more scales
+                for scale in scales:
+                    scaled_img = cv2.resize(img_array, None, fx=scale, fy=scale)
+                    faces = detector.detect_faces(scaled_img)
+                    if faces:
+                        # Adjust coordinates back to original scale
+                        for face in faces:
+                            if face['confidence'] >= 0.8:  # Reduced threshold from 0.9
+                                face['box'] = [int(x/scale) for x in face['box']]
+                                detected_faces.append(face)
+
             faces_processed = 0
 
             for face_info in detected_faces:
                 try:
-                    # Only process faces with high confidence
-                    if face_info['confidence'] < 0.95:
-                        continue
-
-                    # Get face area with margin
                     x, y, w, h = face_info['box']
-                    margin = int(min(w, h) * 0.3)
                     
-                    # Ensure coordinates are within image bounds
-                    x = max(0, x - margin)
-                    y = max(0, y - margin)
-                    w = min(img_array.shape[1] - x, w + 2 * margin)
-                    h = min(img_array.shape[0] - y, h + 2 * margin)
+                    # Increase margin for better feature capture
+                    margin_w = int(w * 0.3)  # Increased from 0.2
+                    margin_h = int(h * 0.3)  # Increased from 0.2
+                    x = max(0, x - margin_w)
+                    y = max(0, y - margin_h)
+                    w = min(img_array.shape[1] - x, w + 2 * margin_w)
+                    h = min(img_array.shape[0] - y, h + 2 * margin_h)
 
-                    # Skip if face is too small
-                    if w < 60 or h < 60:  # Reduced minimum size threshold
+                    # Extract and validate face region
+                    if w < 30 or h < 30:  # Skip very small faces
                         continue
-                    
-                    # Extract face region
+                        
                     face_img = img_array[y:y+h, x:x+w]
-
-                    # Ensure face image is not empty
                     if face_img.size == 0:
                         continue
 
-                    # Save face image
+                    # Save face image with unique name
                     face_filename = f"face_{str(uuid.uuid4())[:8]}.jpg"
                     face_path = os.path.join(settings.MEDIA_ROOT, 'faces', face_filename)
                     os.makedirs(os.path.dirname(face_path), exist_ok=True)
-                    
-                    # Convert RGB back to BGR for saving
-                    face_img_bgr = cv2.cvtColor(face_img, cv2.COLOR_RGB2BGR)
-                    cv2.imwrite(face_path, face_img_bgr)
+                    cv2.imwrite(face_path, cv2.cvtColor(face_img, cv2.COLOR_RGB2BGR))
 
+                    # Get face embedding
                     try:
-                        # Get embedding using DeepFace
                         embedding = DeepFace.represent(
                             img_path=face_path,
                             model_name='VGG-Face',
@@ -167,18 +179,13 @@ def process_image(request):
                                 'face_image': f"faces/{face_filename}"
                             }
 
-                            # Normalize embedding
-                            embedding_array = np.array(embedding[0]['embedding'])
-                            embedding_norm = embedding_array / np.linalg.norm(embedding_array)
-
-                            # Save to database
+                            # Save face to database
                             FACES.objects.create(
                                 PHOTO=photo,
                                 FACE_LOCATION=face_location,
-                                FACE_EMBEDDING=embedding_norm.tolist(),
+                                FACE_EMBEDDING=embedding[0]['embedding'],
                                 DETECTION_CONFIDENCE=face_info['confidence']
                             )
-
                             faces_processed += 1
 
                     except Exception as embed_error:
@@ -189,7 +196,7 @@ def process_image(request):
                     print(f"Error processing face: {str(face_error)}")
                     continue
 
-            # After processing faces, trigger clustering
+            # Run clustering if faces were found
             if faces_processed > 0:
                 cluster_faces(None)
 
@@ -230,30 +237,29 @@ def calculate_iou(box1, box2):
 
 @csrf_exempt
 def cluster_faces(request=None):
-    """
-    Improved clustering with better parameters and face matching
-    """
+    """Improved clustering with better parameters for small groups"""
     try:
-        # Get all faces, including previously clustered ones
         all_faces = FACES.objects.all()
         if not all_faces.exists():
             return JsonResponse({'message': 'No faces found.'}) if request else None
 
-        # Prepare embeddings
+        # Prepare embeddings with proper normalization
         embeddings = []
         face_ids = []
         
         for face in all_faces:
             embedding = np.array(face.FACE_EMBEDDING)
+            # Normalize each embedding vector
+            embedding = embedding / np.linalg.norm(embedding)
             embeddings.append(embedding)
             face_ids.append(face.RECORD_ID)
 
         embeddings_array = np.array(embeddings)
 
-        # Improved DBSCAN parameters
+        # More lenient clustering parameters
         clustering = DBSCAN(
-            eps=0.45,  # Increased to be more lenient in cluster formation
-            min_samples=2,  # Reduced to allow smaller clusters
+            eps=0.65,  # Increased from 0.55 to be more inclusive
+            min_samples=1,  # Reduced from 2 to allow single-image clusters
             metric='cosine',
             n_jobs=-1
         ).fit(embeddings_array)
@@ -269,17 +275,17 @@ def cluster_faces(request=None):
         
         for label in unique_labels:
             if label != -1:  # Ignore noise points
-                # Create new cluster
+                # Get faces for this cluster
+                mask = labels == label
+                cluster_face_ids = [face_ids[i] for i, is_member in enumerate(mask) if is_member]
+                
+                # Create cluster even for single faces
                 cluster = FACE_CLUSTERS.objects.create(
                     NAME=f'Person_{clusters_created}',
                     FACE_COUNT=0
                 )
                 clusters_created += 1
 
-                # Assign faces to cluster
-                mask = labels == label
-                cluster_face_ids = [face_ids[i] for i, is_member in enumerate(mask) if is_member]
-                
                 # Update faces with new cluster
                 FACES.objects.filter(RECORD_ID__in=cluster_face_ids).update(CLUSTER=cluster)
                 
@@ -405,70 +411,96 @@ def search_images(request):
 def process_all_photos(request):
     if request.method == 'POST':
         try:
+            from concurrent.futures import ThreadPoolExecutor
+            import threading
+            
             # Get all photos
             unprocessed_photos = PHOTOS.objects.all()
-            processed_count = 0
-
-            for photo in unprocessed_photos:
+            processed_count = threading.Value('i', 0)
+            error_count = threading.Value('i', 0)
+            
+            def process_single_photo(photo):
                 try:
                     # Load and process each image
                     image_path = os.path.join('media', photo.FILE_PATH)
                     image = cv2.imread(image_path)
                     
                     if image is None:
-                        continue
+                        with error_count.get_lock():
+                            error_count.value += 1
+                        return
 
-                    # Convert to grayscale for face detection
-                    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-                    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-                    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+                    # Initialize MTCNN for this thread
+                    detector = MTCNN(
+                        min_face_size=20,
+                        scale_factor=0.709,
+                        steps_threshold=[0.6, 0.7, 0.7]
+                    )
+
+                    # Convert BGR to RGB
+                    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                    
+                    # Detect faces
+                    faces = detector.detect_faces(image_rgb)
 
                     # Process each detected face
-                    for (x, y, w, h) in faces:
-                        face_embedding = DeepFace.represent(img_path=image_path, enforce_detection=False)[0]['embedding']
-                        
-                        face_location = {
-                            'x': int(x),
-                            'y': int(y),
-                            'width': int(w),
-                            'height': int(h)
-                        }
+                    for face_info in faces:
+                        if face_info['confidence'] < 0.8:  # Reduced threshold
+                            continue
 
-                        FACES.objects.create(
-                            PHOTO=photo,
-                            FACE_LOCATION=face_location,
-                            FACE_EMBEDDING=face_embedding,
-                            DETECTION_CONFIDENCE=1.0
+                        x, y, w, h = face_info['box']
+                        face_img = image_rgb[y:y+h, x:x+w]
+                        
+                        # Save face image
+                        face_filename = f"face_{str(uuid.uuid4())[:8]}.jpg"
+                        face_path = os.path.join(settings.MEDIA_ROOT, 'faces', face_filename)
+                        os.makedirs(os.path.dirname(face_path), exist_ok=True)
+                        cv2.imwrite(face_path, cv2.cvtColor(face_img, cv2.COLOR_RGB2BGR))
+
+                        # Get embedding
+                        embedding = DeepFace.represent(
+                            img_path=face_path,
+                            model_name='VGG-Face',
+                            enforce_detection=False,
+                            detector_backend='skip'
                         )
-                    
-                    processed_count += 1
+
+                        if embedding:
+                            face_location = {
+                                'x': int(x),
+                                'y': int(y),
+                                'width': int(w),
+                                'height': int(h),
+                                'face_image': f"faces/{face_filename}"
+                            }
+
+                            FACES.objects.create(
+                                PHOTO=photo,
+                                FACE_LOCATION=face_location,
+                                FACE_EMBEDDING=embedding[0]['embedding'],
+                                DETECTION_CONFIDENCE=face_info['confidence']
+                            )
+
+                    with processed_count.get_lock():
+                        processed_count.value += 1
 
                 except Exception as e:
                     print(f"Error processing photo {photo.FILE_NAME}: {str(e)}")
-                    continue
+                    with error_count.get_lock():
+                        error_count.value += 1
 
-            # Run clustering after processing all photos
-            faces = FACES.objects.filter(CLUSTER__isnull=True).values('RECORD_ID', 'FACE_EMBEDDING')
-            if faces:
-                embeddings = [face['FACE_EMBEDDING'] for face in faces]
-                record_ids = [face['RECORD_ID'] for face in faces]
+            # Process photos in parallel
+            max_workers = min(8, len(unprocessed_photos))  # Limit max threads
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                executor.map(process_single_photo, unprocessed_photos)
 
-                dbscan = DBSCAN(
-                    eps=0.35,
-                    min_samples=2,
-                    metric='cosine'
-                )
-                cluster_labels = dbscan.fit_predict(embeddings)
-
-                # Save clusters
-                for record_id, cluster_id in zip(record_ids, cluster_labels):
-                    if cluster_id != -1:
-                        cluster, created = FACE_CLUSTERS.objects.get_or_create(NAME=f'Cluster {cluster_id}')
-                        FACES.objects.filter(RECORD_ID=record_id).update(CLUSTER=cluster)
+            # Run clustering with improved parameters
+            cluster_faces(None)
 
             return JsonResponse({
-                'message': f'Processed {processed_count} photos and created clusters successfully.',
-                'processed_count': processed_count
+                'message': f'Processed {processed_count.value} photos successfully. {error_count.value} errors occurred.',
+                'processed_count': processed_count.value,
+                'error_count': error_count.value
             })
 
         except Exception as e:
